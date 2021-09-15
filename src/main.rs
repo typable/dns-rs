@@ -60,7 +60,7 @@ fn fetch_update(props: &HashMap<String, String>, ip: &String) -> bool {
     let query = format!("{}/update?domain={}&host={}&ip={}&password={}", provider_domain, domain, host, ip, password);
     let resp = reqwest::blocking::get(query)
         .expect("Unable to resolve ip provider!");
-    if let StatusCode::OK= resp.status() {
+    if let StatusCode::OK = resp.status() {
         let body = resp.text()
             .expect("Unable to retrieve response text");
         let exp = Regex::new(r"<ErrCount>(\d+)</ErrCount>").expect("Unable to parse regex!");
