@@ -1,0 +1,8 @@
+(
+    provider: Provider(
+        url: "",
+        password: "",
+    ),
+    domains: [
+    ],
+)
