@@ -6,15 +6,11 @@ use regex::Regex;
 use reqwest::StatusCode;
 
 #[derive(Debug, Deserialize)]
-struct Provider {
-    url: String,
-    password: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct Domain {
     domain: String,
     host: String,
+    url: String,
+    password: String,
 }
 
 impl ToString for Domain {
@@ -30,7 +26,6 @@ impl ToString for Domain {
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    provider: Provider,
     domains: Vec<Domain>,
 }
 
@@ -44,7 +39,7 @@ fn main() {
     for domain in config.domains {
         let resolved_domain = resolve_domain(&domain);
         if !ip.eq(&resolved_domain) {
-            if request_update(&config.provider, &domain, &ip) {
+            if request_update(&domain, &ip) {
                 println!("Updated {} to {}", domain.to_string(), ip);
             }
             else {
@@ -79,14 +74,14 @@ fn resolve_domain(domain: &Domain) -> String {
         .expect("Unable to parse into string!"))
 }
 
-fn request_update(provider: &Provider, domain: &Domain, ip: &String) -> bool {
+fn request_update(domain: &Domain, ip: &String) -> bool {
     let query = format!(
         "{}/update?domain={}&host={}&ip={}&password={}",
-        provider.url,
+        domain.url,
         domain.domain,
         domain.host,
         ip,
-        provider.password,
+        domain.password,
     );
     let resp = reqwest::blocking::get(query)
         .expect("Unable to resolve ip provider!");
