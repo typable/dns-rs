@@ -1,104 +1,105 @@
-use std::fs;
-use ron::de::from_str;
-use serde::Deserialize;
-use serde_json::Value;
+use env_logger::Builder;
+use env_logger::Target;
+use log::LevelFilter;
 use regex::Regex;
-use reqwest::StatusCode;
+use serde_json::Value;
+use std::process;
 
-#[derive(Debug, Deserialize)]
-struct Domain {
-    domain: String,
-    host: String,
-    url: String,
-    password: String,
-}
+use dns_rs::error::Error;
+use dns_rs::Config;
+use dns_rs::Domain;
+use dns_rs::Provider;
+use dns_rs::Result;
+use dns_rs::DOMAIN_RESOLVER;
+use dns_rs::IP_RESOLVER;
 
-impl ToString for Domain {
-    fn to_string(&self) -> String {
-        if self.host.is_empty() || self.host.eq("@") {
-            format!("{}", self.domain)
-        }
-        else {
-            format!("{}.{}", self.host, self.domain)
-        }
-    }
-}
+#[macro_use]
+extern crate log;
 
-#[derive(Debug, Deserialize)]
-struct Config {
-    domains: Vec<Domain>,
-}
-
-const IP_RESOLVER_URL: &str = "http://checkip.amazonaws.com";
-const DOMAIN_RESOLVER_URL: &str = "https://dns.google.com/resolve";
-
-fn main() {
-    let config = read_config("config.ron")
-        .expect("Unable to read config file!");
-    let ip = resolve_ip();
+#[tokio::main]
+async fn main() {
+    Builder::new()
+        .format_timestamp_secs()
+        .filter_module("dns_rs", LevelFilter::Info)
+        .target(Target::Stdout)
+        .init();
+    let config = Config::acquire().unwrap_or_else(|err| {
+        error!("unable to load config file! Reason: {}", err);
+        process::exit(1);
+    });
+    info!("resolving ip addr...");
+    let ip_addr = resolve_ip_addr().await.unwrap_or_else(|err| {
+        error!("unable to resolve ip addr! Reason: {}", err);
+        process::exit(1);
+    });
+    info!("ip addr: {}", ip_addr);
+    info!("checking domains");
     for domain in config.domains {
-        let resolved_domain = resolve_domain(&domain);
-        if !ip.eq(&resolved_domain) {
-            if request_update(&domain, &ip) {
-                println!("Updated {} to {}", domain.to_string(), ip);
+        let domain_id = domain.id();
+        info!("[{}]", domain_id);
+        info!("  resolving domain addr...");
+        let domain_addr = match resolve_domain_addr(&domain).await {
+            Ok(domain_addr) => domain_addr,
+            Err(err) => {
+                error!("  unable to resolve domain addr! Reason: {}", err);
+                error!("  status: FAILED");
+                continue;
             }
-            else {
-                println!("Failed to update {} to {}", domain.to_string(), ip);
+        };
+        info!("  domain addr: {}", domain_addr);
+        if !ip_addr.eq(&domain_addr) {
+            warn!("  domain addr does not match with ip addr!");
+            let update = domain.update.clone().unwrap_or(true);
+            if !update {
+                warn!("  updating disabled");
+                warn!("  status: IGNORED");
+                continue;
             }
+            info!("  updating domain addr...");
+            if let Err(err) = update_domain(&config.provider, &domain, &ip_addr).await {
+                error!("  unable to update domain addr! Reason: {}", err);
+                error!("  status: FAILED");
+            } else {
+                info!("  status: UPDATED");
+            }
+        } else {
+            info!("  status: UP TO DATE");
         }
     }
+    info!("done");
 }
 
-fn resolve_ip() -> String {
-    let resp = reqwest::blocking::get(IP_RESOLVER_URL)
-        .expect("Unable to resolve ip provider!");
-    let body = resp.text()
-        .expect("Unable to retrieve response text");
-    body.trim().to_string()
+async fn resolve_ip_addr() -> Result<String> {
+    let mut resp = surf::get(IP_RESOLVER).await?;
+    let body = resp.body_string().await?;
+    Ok(body.trim().to_string())
 }
 
-fn resolve_domain(domain: &Domain) -> String {
-    let query = format!(
-        "{}?name={}&type=A",
-        DOMAIN_RESOLVER_URL,
-        domain.to_string(),
-    );
-    let resp = reqwest::blocking::get(query)
-        .expect("Unable to resolve ip provider!");
-    let body = resp.text()
-        .expect("Unable to retrieve response json");
-    let json: Value = serde_json::from_str(&body)
-        .expect("Unable to parse into json!");
-    String::from(json["Answer"][0]["data"]
-        .as_str().take()
-        .expect("Unable to parse into string!"))
+async fn resolve_domain_addr(domain: &Domain) -> Result<String> {
+    let url = format!("{}?name={}&type=A", DOMAIN_RESOLVER, domain.id());
+    let mut resp = surf::get(url).await?;
+    let body: Value = resp.body_json().await?;
+    let domain_addr = match body["Answer"][0]["data"].as_str().take() {
+        Some(domain_addr) => domain_addr,
+        None => return Err(Error::new("unable to determine domain addr!")),
+    };
+    Ok(domain_addr.to_string())
 }
 
-fn request_update(domain: &Domain, ip: &String) -> bool {
-    let query = format!(
-        "{}/update?domain={}&host={}&ip={}&password={}",
-        domain.url,
-        domain.domain,
-        domain.host,
-        ip,
-        domain.password,
-    );
-    let resp = reqwest::blocking::get(query)
-        .expect("Unable to resolve ip provider!");
-    if let StatusCode::OK = resp.status() {
-        let body = resp.text()
-            .expect("Unable to retrieve response text");
-        let exp = Regex::new(r"<ErrCount>(\d+)</ErrCount>")
-            .expect("Unable to parse regex!");
-        let caps = exp.captures(&body)
-            .expect("Unable to capture regex!");
-        let status = caps.get(1)
-            .map_or("", |group| group.as_str());
-        return status.eq("0")
+async fn update_domain(provider: &Provider, domain: &Domain, ip_addr: &str) -> Result<()> {
+    let url = provider.build(&domain, &ip_addr);
+    let mut resp = surf::get(url).await?;
+    let body = resp.body_string().await?;
+    let exp = Regex::new(r"<ErrCount>(\d+)</ErrCount>")?;
+    let caps = match exp.captures(&body) {
+        Some(caps) => caps,
+        None => {
+            return Err(Error::new(""));
+        }
+    };
+    let status = caps.get(1).map_or("", |cap| cap.as_str());
+    if !status.eq("0") {
+        return Err(Error::new("updating the domain addr failed!"));
     }
-    false
-}
-
-fn read_config(path: &str) -> Result<Config, ron::Error> {
-    from_str(&fs::read_to_string(path)?)
+    Ok(())
 }
