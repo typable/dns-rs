@@ -1,6 +1,6 @@
 # dns-rs
 
-A simple Domain Updater
+An easy to setup dynamic DNS updater
 
 ## Installation
 
