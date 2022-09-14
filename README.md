@@ -66,5 +66,5 @@ password = "XXXXXXXX"
 host = "example.com"
 subdomain = "test"
 password = "XXXXXXXX"
-update = false
+update = false # check but don't update
 ```
